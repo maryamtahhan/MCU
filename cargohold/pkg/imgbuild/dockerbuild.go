@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-	http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,30 +29,31 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
 	logging "github.com/sirupsen/logrus"
+	"github.com/tkdk/cargohold/pkg/constants"
 	"github.com/tkdk/cargohold/pkg/preflightcheck"
 	"github.com/tkdk/cargohold/pkg/utils"
 )
 
 type dockerBuilder struct{}
 
-// Docker implementation of the ImageBuilder interface.
 func (d *dockerBuilder) CreateImage(imageName, cacheDir string) error {
-	wd, _ := os.Getwd()
-	dockerfilePath := fmt.Sprintf("%s/Dockerfile", wd)
-	tmpCacheDir := fmt.Sprintf("%s/io.triton.cache", wd)
-	var allMetadata []CacheMetadataWithDummy
+	tmpBuildContext, err := os.MkdirTemp("", constants.DockerCacheDirPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp build context dir: %w", err)
+	}
+	defer os.RemoveAll(tmpBuildContext)
 
-	// Copy cache contents into a directory within build context
+	tmpCacheDir := filepath.Join(tmpBuildContext, constants.TritonCacheDirName)
 	if err := os.MkdirAll(tmpCacheDir, 0755); err != nil {
 		return fmt.Errorf("failed to create temp cache dir: %w", err)
 	}
-	defer os.RemoveAll(tmpCacheDir)
 
-	err := copyDir(cacheDir+"/.", tmpCacheDir)
+	err = copyDir(filepath.Join(cacheDir, "."), tmpCacheDir)
 	if err != nil {
 		return fmt.Errorf("failed to copy cacheDir into build context: %w", err)
 	}
 
+	var allMetadata []CacheMetadataWithDummy
 	jsonFiles, err := preflightcheck.FindAllTritonCacheJSON(tmpCacheDir)
 	if err != nil {
 		return fmt.Errorf("failed to find cache files: %w", err)
@@ -97,11 +98,11 @@ func (d *dockerBuilder) CreateImage(imageName, cacheDir string) error {
 		return nil
 	})
 
-	err = generateDockerfile(imageName, tmpCacheDir, dockerfilePath)
+	dockerfilePath := filepath.Join(tmpBuildContext, "Dockerfile")
+	err = generateDockerfile(imageName, tmpBuildContext, dockerfilePath)
 	if err != nil {
 		return fmt.Errorf("failed to generate Dockerfile: %w", err)
 	}
-	defer os.Remove(dockerfilePath)
 
 	if _, err = os.Stat(dockerfilePath); os.IsNotExist(err) {
 		return fmt.Errorf("dockerfile not found at %s", dockerfilePath)
@@ -112,7 +113,7 @@ func (d *dockerBuilder) CreateImage(imageName, cacheDir string) error {
 		return fmt.Errorf("failed to create Docker client: %w", err)
 	}
 
-	tar, err := archive.TarWithOptions(wd, &archive.TarOptions{IncludeSourceDir: false})
+	tar, err := archive.TarWithOptions(tmpBuildContext, &archive.TarOptions{IncludeSourceDir: false})
 	if err != nil {
 		return fmt.Errorf("error creating tar: %w", err)
 	}
@@ -122,12 +123,12 @@ func (d *dockerBuilder) CreateImage(imageName, cacheDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal cache metadata: %w", err)
 	}
-
 	labels := map[string]string{
 		"cache.triton.image/metadata":    string(metadataJSON),
 		"cache.triton.image/entry-count": strconv.Itoa(len(allMetadata)),
 		"cache.triton.image/variant":     "multi",
 	}
+
 	buildOptions := types.ImageBuildOptions{
 		Dockerfile: "Dockerfile",
 		Tags:       []string{imageName},
@@ -135,7 +136,6 @@ func (d *dockerBuilder) CreateImage(imageName, cacheDir string) error {
 		Remove:     false,
 		Labels:     labels,
 	}
-
 	buildResponse, err := apiClient.ImageBuild(context.Background(), tar, buildOptions)
 	if err != nil {
 		return fmt.Errorf("error building image: %w", err)

@@ -13,18 +13,17 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/containers/buildah"
-	"github.com/containers/storage/pkg/unshare"
-	logging "github.com/sirupsen/logrus"
+	"github.com/containers/storage/pkg/reexec"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/tkdk/cargohold/pkg/config"
+	"github.com/tkdk/cargohold/pkg/cosignimg"
 	"github.com/tkdk/cargohold/pkg/fetcher"
 	"github.com/tkdk/cargohold/pkg/imgbuild"
 	"github.com/tkdk/cargohold/pkg/logformat"
@@ -43,7 +42,7 @@ func getCacheImage(imageName string) error {
 	return f.FetchAndExtractCache(imageName)
 }
 
-func createCacheImage(imageName, cacheDir string) error {
+func createCacheImage(imageName, cacheDir string, signFlag bool, cosignKey string, useSigstore bool) error {
 	_, err := utils.FilePathExists(cacheDir)
 	if err != nil {
 		return fmt.Errorf("error checking cache file path: %v", err)
@@ -59,7 +58,7 @@ func createCacheImage(imageName, cacheDir string) error {
 		return fmt.Errorf("failed to create the OCI image: %v", err)
 	}
 
-	logging.Info("OCI image created successfully.")
+	logrus.Info("OCI image created successfully.")
 	return nil
 }
 
@@ -70,14 +69,21 @@ func main() {
 	var extractFlag bool
 	var baremetalFlag bool
 	var logLevel string
+	var signFlag bool
+	var cosignKey string
+	var useSigstore bool
 
-	logging.SetReportCaller(true)
-	logging.SetFormatter(logformat.Default)
+	if reexec.Init() {
+		return
+	}
+
+	logrus.SetReportCaller(true)
+	logrus.SetFormatter(logformat.Default)
 
 	// Initialize the config
 	_, err := config.Initialize(config.ConfDir)
 	if err != nil {
-		logging.Fatalf("Error initializing config: %v\n", err)
+		logrus.Fatalf("Error initializing config: %v\n", err)
 		os.Exit(exitLogError)
 	}
 
@@ -87,57 +93,66 @@ func main() {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// logging
 			if err := logformat.ConfigureLogging(logLevel); err != nil {
-				logging.Errorf("Error configuring logging: %v", err)
+				logrus.Errorf("Error configuring logging: %v", err)
 				os.Exit(exitLogError)
 			}
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			config.SetEnabledBaremetal(baremetalFlag)
-			logging.Infof("baremetalFlag %v", baremetalFlag)
+			logrus.Infof("baremetalFlag %v", baremetalFlag)
+
 			if createFlag {
-				if err := createCacheImage(imageName, cacheDirName); err != nil {
-					logging.Errorf("Error creating image: %v\n", err)
+				if err := createCacheImage(imageName, cacheDirName, false, "", false); err != nil {
+					logrus.Errorf("Error creating image: %v\n", err)
 					os.Exit(exitCreateError)
 				}
+				return
 			}
 
 			if extractFlag {
 				if err := getCacheImage(imageName); err != nil {
-					logging.Errorf("Error extracting image: %v\n", err)
+					logrus.Errorf("Error extracting image: %v\n", err)
 					os.Exit(exitExtractError)
 				}
+				return
 			}
 
-			if !createFlag && !extractFlag {
-				logging.Error("No action specified. Use --create or --extract flag.")
-				os.Exit(exitNormal)
+			if signFlag {
+				if cosignKey == "" {
+					logrus.Fatalf("Error: --cosign-key is required when using --sign")
+					os.Exit(exitLogError)
+				}
+				err := cosignimg.SignImage(imageName, cosignKey, useSigstore)
+				if err != nil {
+					logrus.Errorf("Error signing image: %v\n", err)
+					os.Exit(exitCreateError)
+				}
+				logrus.Info("OCI image signed successfully.")
+				return
 			}
+
+			// If none of create, extract, or sign was requested
+			logrus.Error("No action specified. Use --create, --extract, or --sign flag.")
+			os.Exit(exitNormal)
 		},
 	}
 
-	// Define flags for Cobra
 	rootCmd.Flags().BoolVarP(&baremetalFlag, "baremetal", "b", false, "Run baremetal preflight checks")
 	rootCmd.Flags().StringVarP(&imageName, "image", "i", "", "OCI image name")
 	rootCmd.Flags().StringVarP(&cacheDirName, "dir", "d", "", "Triton Cache Directory")
 	rootCmd.Flags().BoolVarP(&createFlag, "create", "c", false, "Create OCI image")
 	rootCmd.Flags().BoolVarP(&extractFlag, "extract", "e", false, "Extract a Triton cache from an OCI image")
 	rootCmd.Flags().StringVarP(&logLevel, "log-level", "l", "", "Set the logging verbosity level: debug, info, warning or error")
+	rootCmd.Flags().BoolVarP(&signFlag, "sign", "s", false, "Sign the OCI image after building it")
+	rootCmd.Flags().StringVarP(&cosignKey, "cosign-key", "k", "", "Path to the cosign private key (if not using Sigstore)")
+	rootCmd.Flags().BoolVarP(&useSigstore, "use-sigstore", "u", false, "Use Sigstore (Fulcio + Rekor) for signing")
 
-	// Ensure the image flag is required
 	ret := rootCmd.MarkFlagRequired("image")
 	if ret != nil {
-		logging.Fatalf("Error: %v\n", ret)
+		logrus.Fatalf("Error: %v\n", ret)
 	}
-	// Important to call from main()
-	if buildah.InitReexec() {
-		return
-	}
-	unshare.MaybeReexecUsingUserNamespace(false)
 
-	config.SetEnabledGPU(true) // ASSUME TRUE FOR NOW
-
-	// Execute the Cobra command
 	if err := rootCmd.Execute(); err != nil {
-		logging.Fatalf("Error: %v\n", err)
+		logrus.Fatalf("Error: %v\n", err)
 	}
 }
