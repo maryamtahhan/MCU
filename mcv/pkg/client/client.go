@@ -44,8 +44,7 @@ type xPU struct {
 func GetXPUInfo(opts HwOptions) (*xPU, error) {
 	if opts.EnableStub != nil {
 		config.SetEnabledStub(*opts.EnableStub)
-		if *opts.EnableStub {
-			logging.Debug("Stub Mode disabled via client options")
+			logging.Debug("Stub Mode enabled via client options")
 		}
 	}
 	cpuInfo, accInfo, err := devices.GetSystemHW()
