@@ -160,8 +160,7 @@ func ExtractCache(opts Options) (matchedIDs, unmatchedIDs []int, err error) {
 func GetSystemGPUInfo(opts HwOptions) (*devices.GPUFleetSummary, error) {
 	if opts.EnableStub != nil {
 		config.SetEnabledStub(*opts.EnableStub)
-		if *opts.EnableStub {
-			logging.Debug("Stub Mode disabled via client options")
+			logging.Debug("Stub Mode enabled via client options")
 		}
 	}
 
